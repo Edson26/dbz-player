@@ -15,9 +15,10 @@
   "dependencies": {
     "@astrojs/node": "^11.1.9",
     "@astrojs/vercel": "^11.0.17",
-    "astro": "^7.4.2",
+    "@sparticuz/chromium": "153.0.0",
+    "astro": "^7.4.3",
     "hls.js": "^1.7.3",
-    "playwright": "^1.64.1"
+    "playwright-core": "1.64.1"
   },
   "devDependencies": {
     "@types/node": "^26.6.5",

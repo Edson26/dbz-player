@@ -1,8 +1,10 @@
 import {
-  chromium,
+  chromium as playwrightChromium,
   type Frame,
   type Browser,
-} from "playwright";
+} from "playwright-core";
+
+import serverlessChromium from "@sparticuz/chromium";
 
 export interface EpisodeSource {
   episode: number;
@@ -27,8 +29,8 @@ export class ResolveError extends Error {
   }
 }
 
-// Evita ejecutar múltiples navegadores a la vez en esta instancia.
-// Esta versión está pensada para uso local.
+// Solo limita las búsquedas dentro de esta instancia del servidor.
+// No es un límite global entre todas las funciones de Vercel.
 let busy = false;
 
 function isHttpUrl(value: string): boolean {
@@ -68,9 +70,53 @@ function detectType(
   return null;
 }
 
+async function launchBrowser(): Promise<Browser> {
+  const isVercel = process.env.VERCEL === "1";
+
+  if (isVercel) {
+    console.info(
+      "[episode resolver] Preparando Chromium serverless",
+    );
+
+    const executablePath =
+      await serverlessChromium.executablePath();
+
+    console.info(
+      "[episode resolver] Iniciando Chromium serverless",
+    );
+
+    return playwrightChromium.launch({
+      args: serverlessChromium.args,
+      executablePath,
+      headless: true,
+      timeout: 30_000,
+    });
+  }
+
+  console.info(
+    "[episode resolver] Iniciando Chromium local",
+  );
+
+  return playwrightChromium.launch({
+    headless: true,
+    timeout: 30_000,
+  });
+}
+
 export async function resolveEpisode(
   episode: number,
 ): Promise<EpisodeSource> {
+  if (
+    !Number.isInteger(episode) ||
+    episode < 1 ||
+    episode > 291
+  ) {
+    throw new ResolveError(
+      "El capítulo debe ser un número entero entre 1 y 291.",
+      400,
+    );
+  }
+
   if (busy) {
     throw new ResolveError(
       "Ya hay una búsqueda en curso. Espera unos segundos.",
@@ -86,9 +132,7 @@ export async function resolveEpisode(
     `https://animeflv.gr/ver/dragon-ball-z-${episode}`;
 
   try {
-    browser = await chromium.launch({
-      headless: true,
-    });
+    browser = await launchBrowser();
 
     const context = await browser.newContext({
       viewport: {
@@ -100,7 +144,6 @@ export async function resolveEpisode(
     const page = await context.newPage();
     const candidates: Candidate[] = [];
 
-    // No necesitamos ventanas emergentes para inspeccionar el video.
     context.on("page", (popup) => {
       if (popup !== page) {
         void popup.close().catch(() => {});
@@ -131,15 +174,30 @@ export async function resolveEpisode(
           return;
         }
 
-        candidates.push({
-          frame: response.request().frame(),
-          url,
-          type,
-        });
+        const frame = response.request().frame();
+
+        const alreadyRegistered = candidates.some(
+          (candidate) =>
+            candidate.frame === frame &&
+            candidate.url === url,
+        );
+
+        if (!alreadyRegistered) {
+          candidates.push({
+            frame,
+            url,
+            type,
+          });
+        }
       } catch {
         // Algunas solicitudes no están asociadas a un frame.
       }
     });
+
+    console.info(
+      "[episode resolver] Abriendo episodio",
+      { episode },
+    );
 
     const response = await page.goto(pageUrl, {
       waitUntil: "domcontentloaded",
@@ -152,7 +210,6 @@ export async function resolveEpisode(
       );
     }
 
-    // Tiempo adicional para reproductores cargados con JavaScript.
     const deadline = Date.now() + 15_000;
     const attemptedFrames = new Set<Frame>();
 
@@ -165,50 +222,80 @@ export async function resolveEpisode(
             continue;
           }
 
-          const directSource = await video.evaluate((element) => {
-            const player = element as HTMLVideoElement;
+          const directSource = await video.evaluate(
+            (element) => {
+              const player = element as HTMLVideoElement;
 
-            return (
-              player.currentSrc ||
-              player.src ||
-              player.querySelector("source")?.src ||
-              ""
-            );
-          });
+              return (
+                player.currentSrc ||
+                player.src ||
+                player.querySelector("source")?.src ||
+                ""
+              );
+            },
+            undefined,
+            {
+              timeout: 2_000,
+            },
+          );
 
           if (isHttpUrl(directSource)) {
+            const type =
+              detectType(directSource) ?? "video";
+
+            console.info(
+              "[episode resolver] Fuente directa detectada",
+              {
+                episode,
+                type,
+              },
+            );
+
             return {
               episode,
               pageUrl,
               sourceUrl: directSource,
-              type: detectType(directSource) ?? "video",
+              type,
             };
           }
 
-          // Intenta activar la carga del video una sola vez por frame.
+          // Intenta activar la carga una sola vez por frame.
           // No pulsa anuncios, CAPTCHAs ni selectores de servidor.
           if (!attemptedFrames.has(frame)) {
             attemptedFrames.add(frame);
 
-            await video.evaluate((element) => {
-              const player = element as HTMLVideoElement;
-              player.muted = true;
+            await video.evaluate(
+              (element) => {
+                const player = element as HTMLVideoElement;
 
-              void player.play().catch(() => {});
-            });
+                player.muted = true;
+
+                void player.play().catch(() => {});
+              },
+              undefined,
+              {
+                timeout: 2_000,
+              },
+            );
           }
 
-          // Solo considera solicitudes del frame que contiene el video.
           const matching = candidates.filter(
             (candidate) => candidate.frame === frame,
           );
 
-          // Prioriza HLS frente a MP4 cuando ambos están presentes.
           const candidate =
             matching.find((item) => item.type === "hls") ??
             matching[0];
 
           if (candidate) {
+            console.info(
+              "[episode resolver] Fuente de red detectada",
+              {
+                episode,
+                type: candidate.type,
+              },
+            );
+
             return {
               episode,
               pageUrl,
@@ -217,7 +304,8 @@ export async function resolveEpisode(
             };
           }
         } catch {
-          // El frame puede navegar o desaparecer durante la inspección.
+          // El frame puede navegar o desaparecer
+          // durante la inspección.
         }
       }
 
@@ -231,7 +319,16 @@ export async function resolveEpisode(
     );
   } finally {
     try {
-      await browser?.close();
+      if (browser) {
+        await browser.close();
+      }
+    } catch (error) {
+      // Un fallo al cerrar no debe ocultar el resultado
+      // o el error original de la inspección.
+      console.warn(
+        "[episode resolver] No se pudo cerrar Chromium",
+        error,
+      );
     } finally {
       busy = false;
     }
