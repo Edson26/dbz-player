@@ -1,0 +1,681 @@
+---
+const initialEpisode = 70;
+---
+
+<!doctype html>
+<html lang="es">
+  <head>
+    <meta charset="UTF-8" />
+
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1"
+    />
+
+    <meta
+      name="description"
+      content="Reproductor personal de episodios de Dragon Ball Z."
+    />
+
+    <title>DBZ Player</title>
+  </head>
+
+  <body>
+    <main class="app">
+      
+      <section class="panel" aria-label="Selector de episodio">
+        
+        <header>
+          <h1>Dragon Ball <span>Z</span></h1>
+        </header>
+
+        <form id="episode-form">
+          
+
+          <div class="search-row">
+            <label for="episode">¿Qué capítulo quieres ver?</label>
+            <input
+              id="episode"
+              name="episode"
+              type="number"
+              min="1"
+              max="291"
+              step="1"
+              value={initialEpisode}
+              required
+            />
+
+            <button id="load" type="submit">
+              Cargar capítulo
+            </button>
+          </div>
+        </form>
+
+        <div class="episode-heading">
+          <h2 id="episode-title">Selecciona un capítulo</h2>
+          <span>1–291</span>
+        </div>
+
+        <div
+          id="player-container"
+          class="player-container"
+          aria-busy="false"
+        >
+          <video
+            id="player"
+            controls
+            playsinline
+            preload="metadata"
+            aria-label="Reproductor del episodio"
+          ></video>
+        </div>
+
+        <p
+          id="status"
+          class="status"
+          role="status"
+          aria-live="polite"
+        >
+          Presiona “Cargar capítulo” para comenzar.
+        </p>
+
+        <div class="navigation">
+          <button id="previous" type="button">
+            ← Anterior
+          </button>
+
+          <button id="play-pause" type="button" disabled>
+            Reproducir
+          </button>
+
+          <button id="next" type="button">
+            Siguiente →
+          </button>
+        </div>
+
+        <a
+          id="original-link"
+          class="original-link"
+          href={`https://animeflv.gr/ver/dragon-ball-z-${initialEpisode}`}
+          target="_blank"
+          rel="noopener noreferrer"
+        ></a>
+      </section>
+
+      <footer>
+        La disponibilidad y reproducción dependen del proveedor.
+        No se alojan archivos de video.
+      </footer>
+    </main>
+
+    <script>
+      import Hls from "hls.js";
+
+      interface EpisodeResponse {
+        episode: number;
+        pageUrl: string;
+        sourceUrl: string;
+        type: "hls" | "video";
+      }
+
+      const form = document.querySelector<HTMLFormElement>(
+        "#episode-form",
+      )!;
+
+      const input = document.querySelector<HTMLInputElement>(
+        "#episode",
+      )!;
+
+      const loadButton = document.querySelector<HTMLButtonElement>(
+        "#load",
+      )!;
+
+      const previous = document.querySelector<HTMLButtonElement>(
+        "#previous",
+      )!;
+
+      const next = document.querySelector<HTMLButtonElement>(
+        "#next",
+      )!;
+
+      const playPause = document.querySelector<HTMLButtonElement>(
+        "#play-pause",
+      )!;
+
+      const player = document.querySelector<HTMLVideoElement>(
+        "#player",
+      )!;
+
+      const container = document.querySelector<HTMLDivElement>(
+        "#player-container",
+      )!;
+
+      const title = document.querySelector<HTMLHeadingElement>(
+        "#episode-title",
+      )!;
+
+      const status = document.querySelector<HTMLParagraphElement>(
+        "#status",
+      )!;
+
+      const originalLink = document.querySelector<HTMLAnchorElement>(
+        "#original-link",
+      )!;
+
+      let currentEpisode = 70;
+      let loading = false;
+      let sourceAttached = false;
+      let hls: Hls | null = null;
+
+      try {
+        const saved = Number(localStorage.getItem("dbz-episode"));
+
+        if (
+          Number.isInteger(saved) &&
+          saved >= 1 &&
+          saved <= 291
+        ) {
+          currentEpisode = saved;
+        }
+      } catch {
+        // El almacenamiento local puede estar deshabilitado.
+      }
+
+      input.value = String(currentEpisode);
+
+      function setStatus(message: string, error = false) {
+        status.textContent = message;
+        status.classList.toggle("error", error);
+      }
+
+      function updateControls() {
+        loadButton.disabled = loading;
+        input.disabled = loading;
+
+        previous.disabled =
+          loading || currentEpisode <= 1;
+
+        next.disabled =
+          loading || currentEpisode >= 291;
+
+        playPause.disabled =
+          loading || !sourceAttached;
+
+        loadButton.textContent =
+          loading ? "Buscando…" : "Cargar capítulo";
+
+        container.setAttribute(
+          "aria-busy",
+          String(loading),
+        );
+      }
+
+      function updateOriginalLink() {
+        originalLink.href =
+          `https://animeflv.gr/ver/dragon-ball-z-${currentEpisode}`;
+      }
+
+      function clearPlayer() {
+        sourceAttached = false;
+
+        hls?.destroy();
+        hls = null;
+
+        player.pause();
+        player.removeAttribute("src");
+        player.load();
+      }
+
+      function playbackError() {
+        sourceAttached = false;
+        updateControls();
+
+        setStatus(
+          "La fuente no se pudo reproducir. Puede haber caducado, " +
+          "requerir la sesión del sitio original o no permitir " +
+          "reproducción desde esta web.",
+          true,
+        );
+      }
+
+      function attachSource(data: EpisodeResponse) {
+        const source = new URL(data.sourceUrl);
+
+        if (
+          source.protocol !== "https:" &&
+          source.protocol !== "http:"
+        ) {
+          throw new Error("El servidor devolvió una fuente no válida.");
+        }
+
+        if (data.type === "hls") {
+          const nativeHls = player.canPlayType(
+            "application/vnd.apple.mpegurl",
+          );
+
+          if (nativeHls) {
+            player.src = data.sourceUrl;
+          } else if (Hls.isSupported()) {
+            hls = new Hls();
+
+            hls.on(Hls.Events.ERROR, (_event, details) => {
+              if (details.fatal) {
+                playbackError();
+
+                hls?.destroy();
+                hls = null;
+              }
+            });
+
+            hls.loadSource(data.sourceUrl);
+            hls.attachMedia(player);
+          } else {
+            throw new Error(
+              "Este navegador no permite reproducir esta fuente HLS.",
+            );
+          }
+        } else {
+          player.src = data.sourceUrl;
+          player.load();
+        }
+
+        sourceAttached = true;
+      }
+
+      async function loadEpisode(episode: number) {
+        if (loading) {
+          return;
+        }
+
+        if (
+          !Number.isInteger(episode) ||
+          episode < 1 ||
+          episode > 291
+        ) {
+          setStatus(
+            "Ingresa un capítulo entero entre 1 y 291.",
+            true,
+          );
+          return;
+        }
+
+        loading = true;
+        clearPlayer();
+
+        currentEpisode = episode;
+        input.value = String(episode);
+        title.textContent = `Capítulo ${episode}`;
+
+        updateOriginalLink();
+        updateControls();
+
+        setStatus(
+          "Inspeccionando el reproductor. Puede tardar unos 40 segundos…",
+        );
+
+        try {
+          const response = await fetch(
+            `/api/episode?number=${episode}`,
+            {
+              cache: "no-store",
+            },
+          );
+
+          const data = await response.json();
+
+          if (!response.ok) {
+            throw new Error(
+              data.error ?? "No se pudo cargar el capítulo.",
+            );
+          }
+
+          attachSource(data as EpisodeResponse);
+
+          try {
+            localStorage.setItem(
+              "dbz-episode",
+              String(episode),
+            );
+          } catch {
+            // La reproducción no depende de localStorage.
+          }
+
+          setStatus(
+            "Fuente detectada. Esperando que el navegador cargue el video…",
+          );
+        } catch (error) {
+          clearPlayer();
+
+          setStatus(
+            error instanceof Error
+              ? error.message
+              : "Ocurrió un error inesperado.",
+            true,
+          );
+        } finally {
+          loading = false;
+          updateControls();
+        }
+      }
+
+      form.addEventListener("submit", (event) => {
+        event.preventDefault();
+
+        if (form.reportValidity()) {
+          void loadEpisode(Number(input.value));
+        }
+      });
+
+      previous.addEventListener("click", () => {
+        void loadEpisode(currentEpisode - 1);
+      });
+
+      next.addEventListener("click", () => {
+        void loadEpisode(currentEpisode + 1);
+      });
+
+      playPause.addEventListener("click", async () => {
+        if (!sourceAttached) {
+          return;
+        }
+
+        if (!player.paused) {
+          player.pause();
+          return;
+        }
+
+        try {
+          await player.play();
+        } catch {
+          setStatus(
+            "No se pudo iniciar la reproducción. " +
+            "Prueba con los controles del video.",
+            true,
+          );
+        }
+      });
+
+      player.addEventListener("play", () => {
+        playPause.textContent = "Pausar";
+        setStatus(`Reproduciendo capítulo ${currentEpisode}.`);
+      });
+
+      player.addEventListener("pause", () => {
+        playPause.textContent = "Reproducir";
+      });
+
+      player.addEventListener("canplay", () => {
+        if (player.paused && sourceAttached) {
+          setStatus("Video listo. Presiona Reproducir.");
+        }
+      });
+
+      player.addEventListener("waiting", () => {
+        if (sourceAttached) {
+          setStatus("Cargando video…");
+        }
+      });
+
+      player.addEventListener("ended", () => {
+        playPause.textContent = "Reproducir";
+        setStatus(
+          "Capítulo terminado. Puedes pasar al siguiente.",
+        );
+      });
+
+      player.addEventListener("error", () => {
+        if (sourceAttached) {
+          playbackError();
+        }
+      });
+
+      window.addEventListener("pagehide", () => {
+        hls?.destroy();
+      });
+
+      updateOriginalLink();
+      updateControls();
+    </script>
+  </body>
+</html>
+
+<style is:global>
+  :root {
+    color-scheme: dark;
+    font-family: Inter, system-ui, sans-serif;
+    background: #080c16;
+    color: #edf2ff;
+  }
+
+  * {
+    box-sizing: border-box;
+  }
+
+  body {
+    margin: 0;
+    min-height: 100vh;
+    background:
+      radial-gradient(
+        ellipse at top,
+        rgba(35, 75, 170, 0.2),
+        transparent 60%
+      ),
+      #080c16;
+  }
+
+  button,
+  input {
+    font: inherit;
+  }
+
+  button,
+  a,
+  input {
+    -webkit-tap-highlight-color: transparent;
+  }
+
+  button:focus-visible,
+  a:focus-visible,
+  input:focus-visible {
+    outline: 3px solid #fbbf24;
+    outline-offset: 4px;
+  }
+
+  .app {
+    width: min(100% - 32px, 980px);
+    margin: 0 auto;
+    padding: 52px 0 28px;
+  }
+
+  header {
+    margin-bottom: 30px;
+  }
+
+  .eyebrow {
+    color: #93a9db;
+    font-size: 12px;
+    font-weight: 700;
+    letter-spacing: 0.18em;
+  }
+
+  h1 {
+    margin: 12px 0;
+    font-size: clamp(36px, 7vw, 60px);
+    letter-spacing: -0.05em;
+  }
+
+  h1 span {
+    color: #fb923c;
+  }
+
+  .subtitle,
+  footer {
+    color: #99a6bf;
+    line-height: 1.6;
+  }
+
+  .panel {
+    padding: 26px;
+    border: 1px solid #25304a;
+    border-radius: 22px;
+    background: #101827;
+    box-shadow: 0 24px 80px #0004;
+  }
+
+  label {
+    display: block;
+    margin-top: 15px;
+    font-size: 14px;
+    font-weight: 600;
+  }
+
+  .search-row {
+    display: flex;
+    gap: 12px;
+  }
+
+  input {
+    width: 140px;
+    min-width: 0;
+    padding: 13px 15px;
+    border: 1px solid #344463;
+    border-radius: 10px;
+    color: #fff;
+    background: #080e1a;
+  }
+
+  button {
+    cursor: pointer;
+    padding: 13px 18px;
+    border: 1px solid transparent;
+    border-radius: 10px;
+    background: #2459d3;
+    color: #fff;
+    font-weight: 650;
+    transition:
+      background 0.15s,
+      opacity 0.15s;
+  }
+
+  button:hover:not(:disabled) {
+    background: #3270f0;
+  }
+
+  button:disabled {
+    cursor: not-allowed;
+    opacity: 0.45;
+  }
+
+  .episode-heading {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 12px;
+    margin-top: 28px;
+  }
+
+  h2 {
+    font-size: 19px;
+  }
+
+  .episode-heading span {
+    color: #8494b4;
+    font-size: 13px;
+  }
+
+  .player-container {
+    overflow: hidden;
+    aspect-ratio: 16 / 9;
+    border: 1px solid #26314a;
+    border-radius: 14px;
+    background: #000;
+  }
+
+  video {
+    display: block;
+    width: 100%;
+    height: 100%;
+    background: #000;
+  }
+
+  .status {
+    min-height: 44px;
+    margin: 16px 0;
+    color: #a7b7d6;
+    font-size: 14px;
+    line-height: 1.6;
+    overflow-wrap: anywhere;
+  }
+
+  .status.error {
+    color: #fca5a5;
+  }
+
+  .navigation {
+    display: grid;
+    grid-template-columns: 1fr 1fr 1fr;
+    gap: 12px;
+  }
+
+  .navigation button {
+    padding-inline: 10px;
+    border-color: #35415c;
+    background: #1b2840;
+  }
+
+  .navigation button:hover:not(:disabled) {
+    background: #293c5d;
+  }
+
+  #play-pause {
+    border-color: #fb923c;
+    background: #fb923c;
+    color: #241207;
+  }
+
+  #play-pause:hover:not(:disabled) {
+    background: #fdba74;
+  }
+
+  .original-link {
+    display: inline-block;
+    margin-top: 22px;
+    color: #92b9ff;
+    font-size: 14px;
+    text-underline-offset: 4px;
+  }
+
+  footer {
+    margin-top: 22px;
+    text-align: center;
+    font-size: 12px;
+  }
+
+  @media (max-width: 560px) {
+    .app {
+      padding-top: 28px;
+    }
+
+    .panel {
+      padding: 16px;
+    }
+
+    .search-row {
+      display: grid;
+      grid-template-columns: 1fr;
+    }
+
+    input {
+      width: 100%;
+    }
+
+    .navigation {
+      gap: 7px;
+    }
+
+    .navigation button {
+      padding: 12px 6px;
+      font-size: 12px;
+    }
+  }
+</style>
